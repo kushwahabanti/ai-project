@@ -7,6 +7,7 @@ let selectedContentType = 'text';
 let messageCount = 0;
 let currentChatId = null;
 let chats = {};
+let lastPosterText = null; // Track last poster for follow-up modifications
 
 // DOM Elements
 const els = {
@@ -133,13 +134,19 @@ async function sendMessage(msg) {
     // Simulate slight delay for premium feel
     await new Promise(r => setTimeout(r, 600));
 
+    const requestBody = { 
+      prompt: msg,
+      tone: selectedTone 
+    };
+    // Send previous poster context for follow-up modifications
+    if (selectedContentType === 'poster' && lastPosterText) {
+      requestBody.previousPosterText = lastPosterText;
+    }
+
     const res = await fetch(`${API_BASE}${endpoint}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ 
-        prompt: msg,
-        tone: selectedTone 
-      })
+      body: JSON.stringify(requestBody)
     });
 
     if (!res.ok) throw new Error(`Server error: ${res.status}`);
@@ -148,7 +155,9 @@ async function sendMessage(msg) {
     loadingDiv.remove();
 
     if (selectedContentType === 'poster') {
-      addPosterMessage(data.posterUrl, data.prompt);
+      addPosterMessage(data.posterUrl, data.prompt, data.posterText);
+      // Save for follow-up modifications
+      lastPosterText = data.posterText;
     } else {
       addBotMessage(data.result || "No response");
     }
@@ -201,7 +210,7 @@ function addLoadingMessage() {
   
   const icon = selectedContentType === 'poster' ? '🎨' : '✨';
   const name = selectedContentType === 'poster' ? 'Poster Generator' : 'AI Assistant';
-  const text = selectedContentType === 'poster' ? 'Designing your poster...' : 'Generating professional copy...';
+  const text = selectedContentType === 'poster' ? 'Generating your poster (this may take 1-2 minutes)...' : 'Generating professional copy...';
 
   wrapper.innerHTML = `
     <div class="bot-message">
@@ -256,10 +265,143 @@ function addBotMessage(text, isError = false) {
   scrollToBottom();
 }
 
-function addPosterMessage(posterUrl, promptText) {
+/**
+ * Renders text on a Canvas overlay on top of the AI-generated background image.
+ * This solves the AI model's inability to render legible English text.
+ */
+function renderPosterWithTextOverlay(canvas, bgImage, posterText) {
+  const ctx = canvas.getContext('2d');
+  const W = 1024, H = 1024;
+  canvas.width = W;
+  canvas.height = H;
+
+  // Draw the AI-generated background image
+  ctx.drawImage(bgImage, 0, 0, W, H);
+
+  // Add a dark gradient scrim at the bottom for text readability
+  const gradient = ctx.createLinearGradient(0, H * 0.35, 0, H);
+  gradient.addColorStop(0, 'rgba(0, 0, 0, 0)');
+  gradient.addColorStop(0.4, 'rgba(0, 0, 0, 0.3)');
+  gradient.addColorStop(1, 'rgba(0, 0, 0, 0.85)');
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, W, H);
+
+  // Also add a subtle top gradient for branding area
+  const topGradient = ctx.createLinearGradient(0, 0, 0, H * 0.25);
+  topGradient.addColorStop(0, 'rgba(0, 0, 0, 0.5)');
+  topGradient.addColorStop(1, 'rgba(0, 0, 0, 0)');
+  ctx.fillStyle = topGradient;
+  ctx.fillRect(0, 0, W, H * 0.25);
+
+  // Text settings
+  ctx.textAlign = 'center';
+
+  const headline = (posterText.headline || 'Your Brand Here').toUpperCase();
+  const tagline = posterText.tagline || 'Quality You Can Trust';
+  const cta = (posterText.cta || 'Shop Now').toUpperCase();
+
+  // --- HEADLINE ---
+  ctx.save();
+  ctx.font = 'bold 72px "Outfit", "Arial Black", sans-serif';
+  ctx.fillStyle = '#FFFFFF';
+  ctx.shadowColor = 'rgba(0, 0, 0, 0.7)';
+  ctx.shadowBlur = 15;
+  ctx.shadowOffsetX = 2;
+  ctx.shadowOffsetY = 2;
+
+  // Word-wrap headline
+  const headlineLines = wrapText(ctx, headline, W - 120, 72);
+  const headlineY = H * 0.62;
+  headlineLines.forEach((line, i) => {
+    ctx.fillText(line, W / 2, headlineY + (i * 82));
+  });
+  ctx.restore();
+
+  // --- TAGLINE ---
+  ctx.save();
+  ctx.font = '400 36px "Inter", "Segoe UI", sans-serif';
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+  ctx.shadowColor = 'rgba(0, 0, 0, 0.5)';
+  ctx.shadowBlur = 10;
+  const taglineY = headlineY + (headlineLines.length * 82) + 20;
+  ctx.fillText(tagline, W / 2, taglineY);
+  ctx.restore();
+
+  // --- CTA BUTTON ---
+  ctx.save();
+  const ctaY = taglineY + 65;
+  const ctaFont = 'bold 28px "Outfit", "Arial Black", sans-serif';
+  ctx.font = ctaFont;
+  const ctaWidth = ctx.measureText(cta).width + 70;
+  const ctaHeight = 56;
+  const ctaX = (W - ctaWidth) / 2;
+
+  // CTA button background
+  const ctaGrad = ctx.createLinearGradient(ctaX, ctaY - ctaHeight + 10, ctaX + ctaWidth, ctaY + 10);
+  ctaGrad.addColorStop(0, '#6366f1');
+  ctaGrad.addColorStop(1, '#8b5cf6');
+  ctx.fillStyle = ctaGrad;
+
+  // Rounded rectangle for CTA
+  const radius = 28;
+  ctx.beginPath();
+  ctx.moveTo(ctaX + radius, ctaY - ctaHeight + 10);
+  ctx.lineTo(ctaX + ctaWidth - radius, ctaY - ctaHeight + 10);
+  ctx.quadraticCurveTo(ctaX + ctaWidth, ctaY - ctaHeight + 10, ctaX + ctaWidth, ctaY - ctaHeight + 10 + radius);
+  ctx.lineTo(ctaX + ctaWidth, ctaY + 10 - radius);
+  ctx.quadraticCurveTo(ctaX + ctaWidth, ctaY + 10, ctaX + ctaWidth - radius, ctaY + 10);
+  ctx.lineTo(ctaX + radius, ctaY + 10);
+  ctx.quadraticCurveTo(ctaX, ctaY + 10, ctaX, ctaY + 10 - radius);
+  ctx.lineTo(ctaX, ctaY - ctaHeight + 10 + radius);
+  ctx.quadraticCurveTo(ctaX, ctaY - ctaHeight + 10, ctaX + radius, ctaY - ctaHeight + 10);
+  ctx.closePath();
+  ctx.fill();
+
+  // CTA text
+  ctx.fillStyle = '#FFFFFF';
+  ctx.shadowColor = 'rgba(0, 0, 0, 0.3)';
+  ctx.shadowBlur = 4;
+  ctx.font = ctaFont;
+  ctx.fillText(cta, W / 2, ctaY - 12);
+  ctx.restore();
+}
+
+/** Word-wrap helper for Canvas text */
+function wrapText(ctx, text, maxWidth, fontSize) {
+  const words = text.split(' ');
+  const lines = [];
+  let currentLine = '';
+
+  for (const word of words) {
+    const testLine = currentLine ? currentLine + ' ' + word : word;
+    if (ctx.measureText(testLine).width > maxWidth && currentLine) {
+      lines.push(currentLine);
+      currentLine = word;
+    } else {
+      currentLine = testLine;
+    }
+  }
+  if (currentLine) lines.push(currentLine);
+
+  // If too many lines, reduce font and retry
+  if (lines.length > 3) {
+    ctx.font = ctx.font.replace(/\d+px/, Math.floor(fontSize * 0.8) + 'px');
+    return wrapText(ctx, text, maxWidth, Math.floor(fontSize * 0.8));
+  }
+
+  return lines;
+}
+
+function addPosterMessage(posterUrl, promptText, posterText) {
   const wrapper = document.createElement("div");
   wrapper.className = "message-wrapper bot-wrapper";
   const timestamp = generateTimestamp();
+  const posterId = 'poster-' + messageCount;
+  const canvasId = 'canvas-' + messageCount;
+  const skelId = 'skel-' + messageCount;
+
+  // Fallback poster text
+  posterText = posterText || { headline: "Your Brand Here", tagline: "Quality You Can Trust", cta: "Shop Now" };
 
   wrapper.innerHTML = `
     <div class="bot-message">
@@ -269,29 +411,32 @@ function addPosterMessage(posterUrl, promptText) {
       </div>
       <div class="bot-content">
         <div class="bot-text">Here is your custom poster design:</div>
-        <div class="poster-container" style="min-height: 250px;">
-          <div class="skeleton-loader" id="skel-${messageCount}" style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; min-height: 250px; color: #cbd5e1; text-align: center; padding: 20px;">
+        <div class="poster-container" style="min-height: 250px; position: relative;">
+          <div class="skeleton-loader" id="${skelId}" style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; min-height: 250px; color: #cbd5e1; text-align: center; padding: 20px;">
             <div class="loading-spinner" style="margin-bottom: 12px;">
               <div class="loading-dot"></div><div class="loading-dot"></div><div class="loading-dot"></div>
             </div>
             <span style="font-size:13px; font-weight:500;">Rendering High-Res Poster...</span>
-            <span style="font-size:11px; opacity:0.7; margin-top:4px;">This process usually takes 20-30 seconds.</span>
+            <span style="font-size:11px; opacity:0.7; margin-top:4px;">This may take 20-30 seconds.</span>
           </div>
-          <img src="${posterUrl}" referrerpolicy="no-referrer" alt="Generated Poster" style="display: none; width: 100%;" 
-               onload="this.style.display='block'; document.getElementById('skel-${messageCount}').style.display='none'; scrollToBottom();" 
-               onerror="document.getElementById('skel-${messageCount}').innerHTML='⚠️ Failed to load. The image generation timed out or was blocked. Try clicking \\'Download HQ\\' to open it directly in a new tab.'; this.style.display='none'; scrollToBottom();" />
+          <canvas id="${canvasId}" style="display: none; width: 100%; border-radius: 12px;"></canvas>
         </div>
       </div>
       <div class="poster-actions">
-        <button class="download-poster-btn" onclick="window.open('${posterUrl}', '_blank', 'noopener,noreferrer')">
+        <button class="download-poster-btn" id="dl-${posterId}" style="display:none;" onclick="downloadCanvasPoster('${canvasId}')">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
-          Download HQ
+          Download Poster
         </button>
+      </div>
+      <div class="poster-text-preview" style="margin: 8px 0; padding: 10px 14px; background: rgba(255,255,255,0.05); border-radius: 10px; border: 1px solid rgba(255,255,255,0.08); font-size: 13px; color: #94a3b8;">
+        <div style="margin-bottom:4px;"><strong style="color:#e2e8f0;">Headline:</strong> ${escapeHtml(posterText.headline)}</div>
+        <div style="margin-bottom:4px;"><strong style="color:#e2e8f0;">Tagline:</strong> ${escapeHtml(posterText.tagline)}</div>
+        <div><strong style="color:#e2e8f0;">CTA:</strong> ${escapeHtml(posterText.cta)}</div>
       </div>
       <div class="message-footer">
         <div class="message-time">${timestamp}</div>
-        <button class="action-btn" onclick="copyMessage(this, '${posterUrl}')">
-          🔗 Copy URL
+        <button class="action-btn" onclick="copyMessage(this, '${escapeHtml(posterText.headline)} - ${escapeHtml(posterText.tagline)}')">
+          📋 Copy Text
         </button>
       </div>
     </div>
@@ -301,6 +446,47 @@ function addPosterMessage(posterUrl, promptText) {
   messageCount++;
   updateMessageCount();
   scrollToBottom();
+
+  // Load the background image and render text overlay using Canvas
+  const bgImage = new Image();
+  // Only set crossOrigin for external URLs (fallback), not for base64 data URLs
+  if (!posterUrl.startsWith('data:')) {
+    bgImage.crossOrigin = 'anonymous';
+  }
+  bgImage.onload = function() {
+    const canvas = document.getElementById(canvasId);
+    const skel = document.getElementById(skelId);
+    const dlBtn = document.getElementById('dl-' + posterId);
+
+    try {
+      renderPosterWithTextOverlay(canvas, bgImage, posterText);
+      canvas.style.display = 'block';
+      if (skel) skel.style.display = 'none';
+      if (dlBtn) dlBtn.style.display = 'inline-flex';
+      scrollToBottom();
+    } catch(e) {
+      console.error('Canvas render error:', e);
+      if (skel) skel.innerHTML = '⚠️ Failed to render poster overlay. Try again.';
+    }
+  };
+  bgImage.onerror = function() {
+    const skel = document.getElementById(skelId);
+    if (skel) skel.innerHTML = '⚠️ Failed to load background image. The generation timed out or was blocked. Please try again.';
+    scrollToBottom();
+  };
+  bgImage.src = posterUrl;
+}
+
+/** Download the Canvas poster as a PNG file */
+window.downloadCanvasPoster = function(canvasId) {
+  const canvas = document.getElementById(canvasId);
+  if (!canvas) return;
+  
+  const link = document.createElement('a');
+  link.download = 'ai-poster-' + Date.now() + '.png';
+  link.href = canvas.toDataURL('image/png');
+  link.click();
+  showToast('📥 Poster downloaded!');
 }
 
 // Utilities

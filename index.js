@@ -93,33 +93,118 @@ app.post("/generate", async (req, res) => {
 // 🎨 Poster generation endpoint
 app.post("/generate-poster", async (req, res) => {
   try {
-    const { prompt } = req.body;
+    const { prompt, previousPosterText } = req.body;
 
     if (!prompt) {
       return res.status(400).json({ error: "Prompt is required" });
     }
 
     console.log("🎨 Generating poster for:", prompt);
+    if (previousPosterText) {
+      console.log("📝 Modifying existing poster:", JSON.stringify(previousPosterText));
+    }
 
-    // Enhanced prompt for better poster generation
-    const enhancedPrompt = `Create a professional advertising poster for: ${prompt}. Make it eye-catching, modern, with bold typography, vibrant colors, and commercial appeal. Professional marketing design, high quality, suitable for print and digital use, write clear readble text with meaning on poster.`;
+    // Build context-aware messages for the AI
+    const systemPrompt = `You are an expert advertising copywriter. Generate poster text content. Reply ONLY in valid JSON format with no extra text or markdown. Use this exact structure:
+{"headline": "short catchy headline (max 6 words)", "tagline": "supporting tagline (max 10 words)", "cta": "call to action (max 4 words)"}
+All text MUST be in English. Keep it punchy and professional.`;
 
-    // Using Pollinations.ai (free AI image generation API)
-    // Alternative free APIs: 
-    // - https://image.pollinations.ai/prompt/YOUR_PROMPT
-    // - Replicate API
-    // - Stability AI (requires API key)
-    
-    const imagePrompt = encodeURIComponent(enhancedPrompt);
-    const posterUrl = `https://image.pollinations.ai/prompt/${imagePrompt}?width=1024&height=1024&model=flux&nologo=true&enhance=true`;
+    let userMessage;
+    if (previousPosterText) {
+      // User is modifying an existing poster — include current text as context
+      userMessage = `Current poster text is:
+- Headline: "${previousPosterText.headline}"
+- Tagline: "${previousPosterText.tagline}"  
+- CTA: "${previousPosterText.cta}"
 
-    console.log("✅ Poster URL generated:", posterUrl);
+The user wants to modify it with this instruction: "${prompt}"
 
-    res.json({ 
-      posterUrl: posterUrl,
-      prompt: prompt,
-      timestamp: new Date().toISOString()
+Apply the user's requested changes to the current poster text. Only change what the user asks for, keep everything else the same. Return the updated JSON.`;
+    } else {
+      // Fresh poster creation
+      userMessage = `Create advertising poster text for: ${prompt}`;
+    }
+
+    // Step 1: Generate poster TEXT content using Groq AI
+    const textResponse = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: "llama-3.1-8b-instant",
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userMessage }
+        ],
+        max_tokens: 150,
+        temperature: 0.7,
+      }),
     });
+
+    let posterText = { headline: "Your Brand Here", tagline: "Quality You Can Trust", cta: "Shop Now" };
+    
+    if (textResponse.ok) {
+      const textData = await textResponse.json();
+      const content = textData.choices?.[0]?.message?.content || "";
+      try {
+        // Try to parse the JSON from the AI response
+        const cleaned = content.replace(/```json\n?|```\n?/g, '').trim();
+        posterText = JSON.parse(cleaned);
+      } catch (e) {
+        console.warn("⚠️ Could not parse poster text, using defaults");
+      }
+    }
+
+    // Step 2: Generate background IMAGE without any text
+    // Keep prompt concise for faster generation
+    const enhancedPrompt = `${prompt} advertisement background, vibrant colors, bokeh, luxury, no text no words no letters`;
+
+    const imagePrompt = encodeURIComponent(enhancedPrompt);
+    const seed = Math.floor(Math.random() * 100000);
+    const pollinationsUrl = `https://image.pollinations.ai/prompt/${imagePrompt}?width=768&height=768&model=flux&nologo=true&seed=${seed}`;
+
+    console.log("📥 Fetching poster image from Pollinations...");
+
+    // Fetch image server-side to avoid CORS issues with Canvas
+    // Pollinations can take 1-3 minutes, so allow generous timeout
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 180000); // 180s timeout
+
+    try {
+      const imgResponse = await fetch(pollinationsUrl, { signal: controller.signal });
+      clearTimeout(timeout);
+
+      if (!imgResponse.ok) {
+        throw new Error(`Image API returned ${imgResponse.status}`);
+      }
+
+      const imgBuffer = await imgResponse.arrayBuffer();
+      const base64 = Buffer.from(imgBuffer).toString('base64');
+      const contentType = imgResponse.headers.get('content-type') || 'image/jpeg';
+      const dataUrl = `data:${contentType};base64,${base64}`;
+
+      console.log("✅ Poster image fetched and converted to base64");
+
+      res.json({ 
+        posterUrl: dataUrl,
+        posterText: posterText,
+        prompt: prompt,
+        timestamp: new Date().toISOString()
+      });
+    } catch (fetchErr) {
+      clearTimeout(timeout);
+      console.error("⚠️ Image fetch failed:", fetchErr.message);
+      // Fallback: send the direct URL and let client try without Canvas export
+      res.json({ 
+        posterUrl: pollinationsUrl,
+        posterText: posterText,
+        prompt: prompt,
+        fallback: true,
+        timestamp: new Date().toISOString()
+      });
+    }
 
   } catch (error) {
     console.error("❌ Poster Generation ERROR:", error.message);
